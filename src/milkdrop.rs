@@ -118,6 +118,9 @@ pub struct Presets {
     pub weighted: bool,
     /// Local mod: each file's pick weight, and their running total.
     weights: Vec<f32>,
+    /// Local mod: each file's content factor, so relisting every 30 s
+    /// doesn't reread ten thousand presets.
+    looks: std::collections::HashMap<PathBuf, f32>,
     pending: Option<Request>,
     download: Option<(&'static str, mpsc::Receiver<Result<usize, String>>)>,
 }
@@ -139,6 +142,7 @@ impl Presets {
             random: true,
             weighted: true,
             weights: Vec::new(),
+            looks: std::collections::HashMap::new(),
             pending: None,
             download: None,
         }
@@ -160,10 +164,14 @@ impl Presets {
                 .iter()
                 .filter_map(|path| path.file_name().map(ToOwned::to_owned))
                 .collect();
+        let looks = &mut self.looks;
         self.weights = self
             .files
             .iter()
-            .map(|path| preset_weight(path, &favorites))
+            .map(|path| {
+                let look = *looks.entry(path.clone()).or_insert_with(|| preset_look(path));
+                preset_weight(path, &favorites) * look
+            })
             .collect();
     }
 
@@ -342,6 +350,60 @@ impl Presets {
     }
 }
 
+/// Local mod: the MilkDrop window's keys, by group. The in-window card and
+/// Settings both draw from this.
+pub const KEYS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Presets",
+        &[
+            ("\u{2192}  or  N", "Next preset"),
+            ("\u{2190}  or  P", "Previous preset"),
+            ("H", "Next preset, cut on the beat"),
+            ("L", "Keep this preset"),
+            ("R", "Random or folder order"),
+            ("Right-click", "Next preset"),
+        ],
+    ),
+    (
+        "Collection",
+        &[
+            ("G", "Favorite this preset, or unfavorite"),
+            ("O", "Play favorites only, or everything"),
+            ("W", "Weighted picks (best first) or even"),
+            ("X", "Ban this preset for good"),
+            ("Q", "Supersampling (sharper), on or off"),
+        ],
+    ),
+    (
+        "Playback",
+        &[
+            ("Space", "Play or pause"),
+            ("Ctrl+\u{2190}  /  Ctrl+\u{2192}", "Previous or next song"),
+            ("Ctrl+\u{2191}  /  Ctrl+\u{2193}", "Volume up or down"),
+            ("M", "Mute or unmute"),
+            ("B", "Like or unlike the playing song"),
+            ("S", "Shuffle"),
+        ],
+    ),
+    (
+        "Window",
+        &[
+            ("F, Alt+Enter, double-click", "Full screen"),
+            ("Esc", "Leave full screen, or close"),
+            ("Drag", "Move it; drag a corner to resize"),
+        ],
+    ),
+    (
+        "Show",
+        &[
+            ("?  or  F1", "These keys"),
+            ("I", "Song title: on a change, always, off"),
+            ("T", "This preset's name, on or off"),
+            ("D", "FPS, on or off"),
+        ],
+    ),
+];
+
 /// Local mod: how likely a preset is to be picked. Favorites most, then
 /// the authors known for deep, flowing, hypnotic work; the huge pile of
 /// near-identical suksma remixes least.
@@ -365,6 +427,31 @@ fn preset_weight(path: &Path, favorites: &std::collections::HashSet<std::ffi::Os
     } else {
         1.0
     }
+}
+
+/// Local mod: presets like the ones banned so far, smeared feedback that
+/// never fades (fDecay=1) and wrapped glitch feedback (sampler_fw_main),
+/// come up less.
+fn preset_look(path: &Path) -> f32 {
+    // Old presets are often Latin-1, not UTF-8.
+    let Ok(bytes) = std::fs::read(path) else {
+        return 1.0;
+    };
+    let text = String::from_utf8_lossy(&bytes);
+    let no_fade = text.lines().any(|line| {
+        line.strip_prefix("fDecay=")
+            .and_then(|value| value.trim().parse::<f32>().ok())
+            .is_some_and(|decay| decay >= 0.999)
+    });
+    let glitch = text.contains("sampler_fw_main");
+    let mut look = 1.0;
+    if no_fade {
+        look *= 0.6;
+    }
+    if glitch {
+        look *= 0.5;
+    }
+    look
 }
 
 /// Local mod: an index drawn in proportion to the weights.

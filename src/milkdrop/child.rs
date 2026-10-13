@@ -726,48 +726,13 @@ impl Child {
             key: Span::new(key, 14.0).weight(600.0),
             does: Span::new(does, 14.0).tint(0.86),
         };
-        let rows = [
-            Row::Line(Span::new("MilkDrop", 22.0).weight(700.0)),
-            Row::Gap(10.0),
-            heading("PRESETS"),
-            Row::Gap(3.0),
-            keys("\u{2192}  or  N", "Next preset"),
-            keys("\u{2190}  or  P", "Previous preset"),
-            keys("H", "Next preset, cut on the beat"),
-            keys("L", "Keep this preset"),
-            keys("R", "Random or folder order"),
-            keys("Right-click", "Next preset"),
-            Row::Gap(9.0),
-            heading("COLLECTION"),
-            Row::Gap(3.0),
-            keys("G", "Favorite this preset, or unfavorite"),
-            keys("O", "Play favorites only, or everything"),
-            keys("W", "Weighted picks (best first) or even"),
-            keys("X", "Ban this preset for good"),
-            keys("Q", "Supersampling (sharper), on or off"),
-            Row::Gap(9.0),
-            heading("PLAYBACK"),
-            Row::Gap(3.0),
-            keys("Space", "Play or pause"),
-            keys("Ctrl+\u{2190}  /  Ctrl+\u{2192}", "Previous or next song"),
-            keys("Ctrl+\u{2191}  /  Ctrl+\u{2193}", "Volume up or down"),
-            keys("M", "Mute or unmute"),
-            keys("B", "Like or unlike the playing song"),
-            keys("S", "Shuffle"),
-            Row::Gap(9.0),
-            heading("WINDOW"),
-            Row::Gap(3.0),
-            keys("F, Alt+Enter, double-click", "Full screen"),
-            keys("Esc", "Leave full screen, or close"),
-            keys("Drag", "Move it; drag a corner to resize"),
-            Row::Gap(9.0),
-            heading("SHOW"),
-            Row::Gap(3.0),
-            keys("?  or  F1", "These keys"),
-            keys("I", "Song title: on a change, always, off"),
-            keys("T", "This preset's name, on or off"),
-            keys("D", "FPS, on or off"),
-        ];
+        let mut rows = vec![Row::Line(Span::new("MilkDrop", 22.0).weight(700.0))];
+        for (group, list) in crate::milkdrop::KEYS {
+            rows.push(Row::Gap(if rows.len() == 1 { 10.0 } else { 9.0 }));
+            rows.push(heading(&group.to_uppercase()));
+            rows.push(Row::Gap(3.0));
+            rows.extend(list.iter().map(|(key, does)| keys(key, does)));
+        }
         overlay.show(
             &live.gl,
             &rows,

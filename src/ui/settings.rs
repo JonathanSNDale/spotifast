@@ -1578,6 +1578,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .collect::<Vec<_>>()
                 .join(" "),
         ),
+        // Local mod: the MilkDrop window's keys, also on its ? card.
+        RowText::new(
+            "Keys",
+            crate::milkdrop::KEYS
+                .iter()
+                .flat_map(|(_, list)| list.iter().map(|(key, does)| format!("{key} {does}")))
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
     ];
     if section_matches(&needle, "MilkDrop", &milkdrop_rows) {
         any_visible = true;
@@ -1725,6 +1734,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     }
                 });
             });
+            if milkdrop_rows[6].matches(&needle, "MilkDrop") {
+                ui.add_space(14.0);
+                theme::text(ui, "Keys in the MilkDrop window", theme::semibold(14.0), palette.text);
+                ui.add_space(8.0);
+                egui::Grid::new("milkdrop_keys")
+                    .num_columns(2)
+                    .spacing([24.0, 6.0])
+                    .show(ui, |ui| {
+                        for (group, list) in crate::milkdrop::KEYS {
+                            theme::text(ui, group.to_uppercase(), theme::bold(11.5), palette.secondary);
+                            ui.end_row();
+                            for (key, does) in *list {
+                                theme::text(ui, *key, theme::semibold(13.0), palette.text);
+                                theme::text(ui, *does, theme::regular(13.5), palette.secondary);
+                                ui.end_row();
+                            }
+                        }
+                    });
+            }
         });
     }
 
