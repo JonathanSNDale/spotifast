@@ -31,6 +31,9 @@ pub struct Engine {
     switch: Box<AtomicU8>,
     seconds: u32,
     locked: bool,
+    /// Local mod: projectM draws this many times wider and taller into an
+    /// offscreen framebuffer, which is filtered down onto the window.
+    supersample: u32,
 }
 
 /// A framebuffer the picture's size, with the texture it draws into.
@@ -67,8 +70,9 @@ unsafe extern "C" fn switch_failed(
                 .into_owned()
         }
     };
-    log::warn!(
-        "MilkDrop could not load {}: {}",
+    // Local mod: the child has no logger, so log::warn! went nowhere.
+    eprintln!(
+        "[milkdrop-mod] could not load {}: {}",
         text(preset_filename),
         text(message)
     );
@@ -117,11 +121,18 @@ impl Engine {
             );
             pm::projectm_set_preset_duration(handle, f64::from(seconds));
             pm::projectm_set_soft_cut_duration(handle, CROSSFADE_SECONDS);
-            // Beat-driven cuts are off, as MilkDrop shipped them.
-            pm::projectm_set_hard_cut_enabled(handle, false);
+            // Local mod: hard cuts only on big drops (projectM's default
+            // sensitivity, not the twitchy 1.0) and never before a preset has
+            // had 5s; otherwise presets crossfade on the timer. The beat
+            // response inside presets stays pushed harder than stock.
+            pm::projectm_set_hard_cut_enabled(handle, true);
+            pm::projectm_set_hard_cut_duration(handle, 5.0);
+            pm::projectm_set_hard_cut_sensitivity(handle, 2.0);
+            pm::projectm_set_beat_sensitivity(handle, 1.6);
             pm::projectm_set_aspect_correction(handle, true);
             // MilkDrop's own mesh, on which the per-vertex equations run.
-            pm::projectm_set_mesh_size(handle, 48, 36);
+            // Local mod: 128x72 (16:9) instead of 48x36 for finer warps at 1440p.
+            pm::projectm_set_mesh_size(handle, 128, 72);
             pm::projectm_set_fps(handle, 60);
         }
         let engine = Self {
@@ -131,6 +142,7 @@ impl Engine {
             switch,
             seconds,
             locked: false,
+            supersample: 1,
         };
         engine.set_texture_dirs(texture_dirs);
         Some(engine)
@@ -168,13 +180,22 @@ impl Engine {
         }
     }
 
+    /// Local mod: 1 for native resolution, 2 for 2x2 supersampling.
+    pub fn set_supersample(&mut self, factor: u32) {
+        self.supersample = factor.clamp(1, 2);
+    }
+
     /// Loads a preset, fading into it or cutting straight to it. One that
     /// cannot be read is reported through the failure callback and the
     /// one playing stays.
     pub fn load(&mut self, path: &Path, smooth: bool) {
+        // Local mod: report slow loads (shader compiles stall the frame).
+        let started = std::time::Instant::now();
+        let shown = path.display().to_string();
         let Ok(path) = CString::new(path.to_string_lossy().as_bytes()) else {
             return;
         };
+        let _slow = SlowLoad { started, shown };
         // SAFETY: a live handle and a string that lives for the call.
         unsafe { pm::projectm_load_preset_file(self.handle, path.as_ptr(), smooth) };
         self.switch.store(NOTHING, Ordering::Relaxed);
@@ -222,8 +243,13 @@ impl Engine {
             return;
         }
         let scale = scale.max(1);
-        let inner_w = (width / scale).max(2) & !1;
-        let inner_h = (height / scale).max(2) & !1;
+        // Local mod: supersampling only applies at full resolution.
+        let ss = if scale == 1 { self.supersample } else { 1 };
+        let (inner_w, inner_h) = if ss > 1 {
+            (width * ss, height * ss)
+        } else {
+            ((width / scale).max(2) & !1, (height / scale).max(2) & !1)
+        };
         if self
             .copy
             .as_ref()
@@ -246,6 +272,37 @@ impl Engine {
             // the stretched picture went into projectM's guts while the
             // window kept only the small corner projectM draws directly.
             let target = None;
+            if ss > 1 {
+                // Local mod: draw big straight into the copy, then filter it
+                // down; a 2:1 linear blit averages each 2x2 block.
+                gl.disable(glow::SCISSOR_TEST);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(copy.framebuffer));
+                gl.viewport(0, 0, w, h);
+                pm::projectm_opengl_render_frame_fbo(self.handle, copy.framebuffer.0.get());
+                gl.disable(glow::SCISSOR_TEST);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(copy.framebuffer));
+                gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, target);
+                gl.blit_framebuffer(
+                    0,
+                    0,
+                    w,
+                    h,
+                    left,
+                    bottom,
+                    left + full_w,
+                    bottom + full_h,
+                    glow::COLOR_BUFFER_BIT,
+                    glow::LINEAR,
+                );
+                gl.bind_framebuffer(glow::FRAMEBUFFER, target);
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(left, bottom, full_w, full_h);
+                gl.color_mask(false, false, false, true);
+                gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+                gl.color_mask(true, true, true, true);
+                return;
+            }
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, target);
             gl.disable(glow::SCISSOR_TEST);
             gl.viewport(0, 0, w, h);
@@ -364,6 +421,21 @@ impl Drop for Engine {
                 self.gl.delete_framebuffer(copy.framebuffer);
                 self.gl.delete_texture(copy.texture);
             }
+        }
+    }
+}
+
+/// Local mod: logs a preset load that held up the frame, when it ends.
+struct SlowLoad {
+    started: std::time::Instant,
+    shown: String,
+}
+
+impl Drop for SlowLoad {
+    fn drop(&mut self) {
+        let ms = self.started.elapsed().as_millis();
+        if ms >= 20 {
+            eprintln!("[milkdrop-mod] slow load {ms}ms: {}", self.shown);
         }
     }
 }

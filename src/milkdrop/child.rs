@@ -7,7 +7,7 @@
 
 use std::io::{BufRead, Write};
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -205,6 +205,10 @@ struct Child {
     screen_hz: Option<f32>,
     scale: u32,
     seconds: u32,
+    /// Local mod: play only presets from milkdrop-favorites/.
+    favorites_only: bool,
+    /// Local mod: 2 when supersampling, else 1; kept across launches.
+    supersample: u32,
     pointer: PhysicalPosition<f64>,
     last_click: Option<Instant>,
     next_frame: Instant,
@@ -243,6 +247,8 @@ impl Child {
             fps,
             scale,
             seconds,
+            favorites_only: false,
+            supersample: 1,
             pointer: PhysicalPosition::new(0.0, 0.0),
             last_click: None,
             next_frame: Instant::now(),
@@ -308,6 +314,14 @@ impl Child {
                 live.window.request_redraw();
                 self.live = Some(live);
                 self.read_screen_hz();
+                // Local mod: supersampling unless switched off with Q, and the
+                // keys on show at every launch.
+                self.set_supersample(if self.mod_file("milkdrop-supersample-off").exists() {
+                    1
+                } else {
+                    2
+                });
+                self.show_keys();
             }
             Err(error) => {
                 eprintln!("MilkDrop: {error}");
@@ -338,10 +352,21 @@ impl Child {
     }
 
     fn render(&mut self) {
+        // Local mod: report frames that took long enough to be seen as a freeze.
+        let started = Instant::now();
+        self.render_inner();
+        let ms = started.elapsed().as_millis();
+        if ms >= 50 {
+            let preset = self.presets.current().map(|p| p.display().to_string());
+            eprintln!("[milkdrop-mod] frame stall {ms}ms on {}", preset.unwrap_or_default());
+        }
+    }
+
+    fn render_inner(&mut self) {
+        let folder = self.play_folder();
         let Some(live) = &mut self.live else {
             return;
         };
-        let folder = self.args.presets.clone();
         self.presets.refresh(&folder);
         if self.presets.current().is_none() && self.presets.count() > 0 {
             self.presets.next(false);
@@ -607,6 +632,38 @@ impl Child {
             Key::Character("n") | Key::Character("N") if plain => self.presets.next(false),
             Key::Character("p") | Key::Character("P") if plain => self.presets.previous(),
             Key::Character("h") | Key::Character("H") if plain => self.presets.next(true),
+            // Local mod: X bans the playing preset into milkdrop-banned/ beside
+            // the presets folder, then cuts to the next one.
+            Key::Character("x") | Key::Character("X") if plain => self.ban_current(),
+            // Local mod: G keeps the preset in milkdrop-favorites/ (or takes it
+            // out again), O plays only those, Q switches supersampling.
+            Key::Character("g") | Key::Character("G") if plain => self.toggle_favorite(),
+            Key::Character("o") | Key::Character("O") if plain => self.toggle_favorites_only(),
+            Key::Character("w") | Key::Character("W") if plain => {
+                self.presets.weighted = !self.presets.weighted;
+                let note = if self.presets.weighted {
+                    "Weighted picks: favorites and the greats first"
+                } else {
+                    "Even picks: every preset alike"
+                };
+                self.show_note(note.into());
+            }
+            Key::Character("q") | Key::Character("Q") if plain => {
+                let on = self.supersample == 1;
+                let marker = self.mod_file("milkdrop-supersample-off");
+                let _ = if on {
+                    std::fs::remove_file(&marker)
+                } else {
+                    std::fs::write(&marker, b"")
+                };
+                self.set_supersample(if on { 2 } else { 1 });
+                let note = if on {
+                    "Supersampling on (2x)"
+                } else {
+                    "Supersampling off"
+                };
+                self.show_note(note.into());
+            }
             Key::Character("l") | Key::Character("L") if plain => {
                 self.presets.locked = !self.presets.locked;
                 let note = if self.presets.locked {
@@ -681,6 +738,14 @@ impl Child {
             keys("R", "Random or folder order"),
             keys("Right-click", "Next preset"),
             Row::Gap(9.0),
+            heading("COLLECTION"),
+            Row::Gap(3.0),
+            keys("G", "Favorite this preset, or unfavorite"),
+            keys("O", "Play favorites only, or everything"),
+            keys("W", "Weighted picks (best first) or even"),
+            keys("X", "Ban this preset for good"),
+            keys("Q", "Supersampling (sharper), on or off"),
+            Row::Gap(9.0),
             heading("PLAYBACK"),
             Row::Gap(3.0),
             keys("Space", "Play or pause"),
@@ -713,6 +778,114 @@ impl Child {
         );
         self.showing_keys = true;
         live.window.request_redraw();
+    }
+
+    /// Local mod: a file or folder beside the presets folder.
+    fn mod_file(&self, name: &str) -> PathBuf {
+        self.args.presets.with_file_name(name)
+    }
+
+    /// Local mod: the folder presets are picked from right now.
+    fn play_folder(&self) -> PathBuf {
+        if self.favorites_only {
+            self.mod_file("milkdrop-favorites")
+        } else {
+            self.args.presets.clone()
+        }
+    }
+
+    fn set_supersample(&mut self, factor: u32) {
+        self.supersample = factor;
+        if let Some(live) = &mut self.live {
+            live.engine.set_supersample(factor);
+        }
+    }
+
+    /// Local mod: copies the playing preset into milkdrop-favorites/, or
+    /// removes it from there when it is already in.
+    fn toggle_favorite(&mut self) {
+        let Some(path) = self.presets.current().map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(name) = path.file_name() else {
+            return;
+        };
+        let folder = self.mod_file("milkdrop-favorites");
+        let kept = folder.join(name);
+        let note = if kept.exists() {
+            match std::fs::remove_file(&kept) {
+                Ok(()) => {
+                    if self.favorites_only {
+                        self.presets.list(&folder);
+                    }
+                    "Removed from favorites".to_string()
+                }
+                Err(error) => format!("Could not unfavorite: {error}"),
+            }
+        } else {
+            match std::fs::create_dir_all(&folder).and_then(|()| std::fs::copy(&path, &kept)) {
+                Ok(_) => {
+                    let folder = self.play_folder();
+                    self.presets.list(&folder);
+                    "Favorited".to_string()
+                }
+                Err(error) => format!("Could not favorite: {error}"),
+            }
+        };
+        self.show_note(note);
+    }
+
+    /// Local mod: switches between all presets and the favorites alone.
+    fn toggle_favorites_only(&mut self) {
+        let folder = self.mod_file("milkdrop-favorites");
+        if !self.favorites_only && super::list_presets(&folder).is_empty() {
+            self.show_note("No favorites yet: press G on one you love".into());
+            return;
+        }
+        self.favorites_only = !self.favorites_only;
+        let folder = self.play_folder();
+        self.presets.list(&folder);
+        self.presets.next(false);
+        let note = if self.favorites_only {
+            format!("Favorites only ({})", self.presets.count())
+        } else {
+            "All presets".to_string()
+        };
+        self.show_note(note);
+    }
+
+    /// Local mod: moves the playing preset out of the rotation, and out of
+    /// the favorites too.
+    fn ban_current(&mut self) {
+        let Some(path) = self.presets.current().map(Path::to_path_buf) else {
+            return;
+        };
+        let name = path.file_name().unwrap_or_default().to_owned();
+        let banned = self.mod_file("milkdrop-banned");
+        let favorite = self.mod_file("milkdrop-favorites").join(&name);
+        // In favorites-only mode the playing file is the favorite's copy;
+        // the one in the main folder is what has to go.
+        let original = self.args.presets.join(&name);
+        let source = if path == favorite && original.exists() {
+            original
+        } else {
+            path.clone()
+        };
+        let moved = std::fs::create_dir_all(&banned)
+            .and_then(|()| std::fs::rename(&source, banned.join(&name)));
+        if moved.is_ok() && favorite.exists() {
+            let _ = std::fs::remove_file(&favorite);
+        }
+        let note = match moved {
+            Ok(()) => {
+                eprintln!("[milkdrop-mod] banned {}", source.display());
+                self.presets.list(&self.play_folder());
+                self.presets.next(true);
+                "Preset banned".to_string()
+            }
+            Err(error) => format!("Could not ban: {error}"),
+        };
+        self.show_note(note);
     }
 
     /// A line of its own, low in the picture: a short answer to a key.

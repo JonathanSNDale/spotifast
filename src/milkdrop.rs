@@ -114,6 +114,10 @@ pub struct Presets {
     pub locked: bool,
     /// Random order when true; folder order when false.
     random: bool,
+    /// Local mod: random picks lean toward favorites and the great authors.
+    pub weighted: bool,
+    /// Local mod: each file's pick weight, and their running total.
+    weights: Vec<f32>,
     pending: Option<Request>,
     download: Option<(&'static str, mpsc::Receiver<Result<usize, String>>)>,
 }
@@ -133,6 +137,8 @@ impl Presets {
             at: 0,
             locked: false,
             random: true,
+            weighted: true,
+            weights: Vec::new(),
             pending: None,
             download: None,
         }
@@ -149,6 +155,16 @@ impl Presets {
     pub fn list(&mut self, folder: &Path) {
         self.listed = Some(Instant::now());
         self.files = list_presets(folder);
+        let favorites: std::collections::HashSet<std::ffi::OsString> =
+            list_presets(&folder.with_file_name("milkdrop-favorites"))
+                .iter()
+                .filter_map(|path| path.file_name().map(ToOwned::to_owned))
+                .collect();
+        self.weights = self
+            .files
+            .iter()
+            .map(|path| preset_weight(path, &favorites))
+            .collect();
     }
 
     pub fn count(&self) -> usize {
@@ -207,7 +223,11 @@ impl Presets {
                 .unwrap_or(0);
             return Some(self.files[next].clone());
         }
-        let mut index = rand::random_range(0..self.files.len());
+        let mut index = if self.weighted && self.weights.len() == self.files.len() {
+            weighted_index(&self.weights)
+        } else {
+            rand::random_range(0..self.files.len())
+        };
         if self.files.len() > 1 && Some(self.files[index].as_path()) == current {
             index = (index + 1) % self.files.len();
         }
@@ -320,6 +340,44 @@ impl Presets {
             }
         }
     }
+}
+
+/// Local mod: how likely a preset is to be picked. Favorites most, then
+/// the authors known for deep, flowing, hypnotic work; the huge pile of
+/// near-identical suksma remixes least.
+fn preset_weight(path: &Path, favorites: &std::collections::HashSet<std::ffi::OsString>) -> f32 {
+    if path.file_name().is_some_and(|name| favorites.contains(name)) {
+        return 8.0;
+    }
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let name = name.trim_start_matches(['$', ' ', '_', '-']);
+    const GREAT: [&str; 16] = [
+        "flexi", "martin", "geiss", "eos", "eo.s", "rovastar", "aderrasi", "unchained",
+        "fishbrain", "zylot", "stahlregen", "krash", "en d", "tripgnosis", "illusion", "orb",
+    ];
+    if GREAT.iter().any(|author| name.starts_with(author)) {
+        3.0
+    } else if name.starts_with("suksma") {
+        0.25
+    } else {
+        1.0
+    }
+}
+
+/// Local mod: an index drawn in proportion to the weights.
+fn weighted_index(weights: &[f32]) -> usize {
+    let total: f32 = weights.iter().sum();
+    let mut left = rand::random_range(0.0..total.max(f32::MIN_POSITIVE));
+    for (index, weight) in weights.iter().enumerate() {
+        left -= weight;
+        if left < 0.0 {
+            return index;
+        }
+    }
+    weights.len().saturating_sub(1)
 }
 
 /// Every `.milk` file in a folder and the folders inside it, sorted by
